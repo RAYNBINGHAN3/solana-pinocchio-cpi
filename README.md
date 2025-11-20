@@ -9,7 +9,6 @@
 > **⚠️ Important: This project is a high-performance Solana CPI execution program, designed exclusively for on-chain DEX trade execution. All complex computations (e.g., arbitrage pathfinding, optimal amount calculation) must be performed off-chain.**
 
 ---
-With low Compute Units Consumed
 <img width="1739" height="709" alt="image" src="https://github.com/user-attachments/assets/45238a54-0e4c-4f6e-834d-7c8671b3e9d3" />
 
 ---
@@ -148,5 +147,6 @@ send_transaction_with_instruction(
     instruction_data
 );
 ```
+
 
 
