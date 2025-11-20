@@ -5,7 +5,18 @@ use pinocchio::{
     cpi::invoke,
     ProgramResult,
 };
+use crate::error::PinocchioCpiError;
 
+const DLMM_INSTRUCTION_DATA: [u8; 28] = [
+    // swap discriminator [0..8]
+    65, 75, 63, 76, 235, 91, 91, 136,
+    // amount_in placeholder [8..16] - 将被替换
+    0, 0, 0, 0, 0, 0, 0, 0,
+    // minimum_amount_out = 0 [16..24]
+    0, 0, 0, 0, 0, 0, 0, 0,
+    // remaining_accounts_info slices.len() = 0 [24..28]
+    0, 0, 0, 0,
+];
 
 pub fn execute_dlmm_swap(
     trade_amount: u64,
@@ -63,18 +74,9 @@ pub fn execute_dlmm_swap(
         AccountMeta::new(dlmm_accounts[8].key(), true, false),   // bin_array_1(writable)
     ];
 
-    // 🚀 优化4: 栈分配指令数据，预分配精确容量
-    let mut instruction_data = [0u8; 28];
-    
-    // 复制discriminator
-    instruction_data[0..8].copy_from_slice(&[65, 75, 63, 76, 235, 91, 91, 136]);
-    // 复制amount_in
+    // 🚀 优化：预构建模板，只替换变量部分
+    let mut instruction_data = DLMM_INSTRUCTION_DATA;
     instruction_data[8..16].copy_from_slice(&trade_amount.to_le_bytes());
-    // minimum_amount_out = 0
-    instruction_data[16..24].copy_from_slice(&0u64.to_le_bytes());
-    // remaining_accounts_info: RemainingAccountsInfo { slices: Vec<RemainingAccountsSlice> }
-    // 空的 slices 向量序列化为: [长度(4字节) = 0]
-    instruction_data[24..28].copy_from_slice(&0u32.to_le_bytes()); // slices.len() = 0
 
 
     // 🚀 优化5: 构建Pinocchio指令结构
@@ -109,5 +111,188 @@ pub fn execute_dlmm_swap(
 
  
     // 使用编译时常量指定账户数量，最大化性能
+    invoke::<19>(&swap_instruction, &account_infos).map_err(|e| e.into())
+}
+
+
+pub fn execute_dlmm_swap_hop3(
+    trade_amount: u64,
+    header_accounts: &[AccountInfo],
+    dlmm_accounts: &[AccountInfo],
+    step: u8,
+    is_wsol_x_mint: bool,
+) -> ProgramResult {
+ 
+    match step {
+        1 => {
+            return execute_dlmm_swap(trade_amount, header_accounts, dlmm_accounts, true, is_wsol_x_mint)
+        }
+        2 => {
+            return execute_dlmm_swap_mid(trade_amount, header_accounts, dlmm_accounts, is_wsol_x_mint)
+        }
+        3 => {
+            return execute_dlmm_swap_sell(trade_amount, header_accounts, dlmm_accounts, is_wsol_x_mint)
+        }
+        _ => {
+            return Err(PinocchioCpiError::UnsupportedPoolType.into());
+        }
+    }
+}
+
+fn execute_dlmm_swap_mid(
+    trade_amount: u64,
+    header_accounts: &[AccountInfo],
+    dlmm_accounts: &[AccountInfo],
+    is_mid_zero_to_one: bool,
+) -> ProgramResult {
+    // 中间交换：Token1 -> Token2
+    // 输入：header_accounts[8] (token1_account)
+    // 输出：header_accounts[11] (token2_account)
+    
+    // is_mid_zero_to_one表示是否是token0->token1的方向
+    // 如果是token0->token1，那么Token1是X，Token2是Y
+    // 如果是token1->token0，那么Token1是Y，Token2是X
+    let (token_x_mint, token_y_mint, token_x_program, token_y_program) = if is_mid_zero_to_one {
+        // Token1是X，Token2是Y (token0->token1)
+        (&header_accounts[6], &header_accounts[9], &header_accounts[7], &header_accounts[10])
+    } else {
+        // Token1是Y，Token2是X (token1->token0)
+        (&header_accounts[9], &header_accounts[6], &header_accounts[10], &header_accounts[7])
+    };
+
+    let dlmm_program_id = &dlmm_accounts[0];
+    
+    let account_metas = [
+        AccountMeta::new(dlmm_accounts[3].key(), true, false),   // pool_state(writable)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // bin_array_bitmap_extension(readonly)
+        AccountMeta::new(dlmm_accounts[4].key(), true, false),   // reserve_x(writable)
+        AccountMeta::new(dlmm_accounts[5].key(), true, false),   // reserve_y(writable)
+        AccountMeta::new(header_accounts[8].key(), true, false), // user_token_in (token1_account)
+        AccountMeta::new(header_accounts[11].key(), true, false), // user_token_out (token2_account)
+        AccountMeta::new(token_x_mint.key(), false, false),     // token_x_mint(readonly)
+        AccountMeta::new(token_y_mint.key(), false, false),     // token_y_mint(readonly)
+        AccountMeta::new(dlmm_accounts[2].key(), true, false),   // oracle(writable)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // host_fee_in(readonly)
+        AccountMeta::new(header_accounts[0].key(), true, true),  // payer (signer)
+        AccountMeta::new(token_x_program.key(), false, false),   // token_x_program(readonly)
+        AccountMeta::new(token_y_program.key(), false, false),   // token_y_program(readonly)
+        AccountMeta::new(header_accounts[5].key(), false, false), // memo_program(readonly)
+        AccountMeta::new(dlmm_accounts[1].key(), false, false),  // event_authority(readonly)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // program id(readonly)
+        AccountMeta::new(dlmm_accounts[6].key(), true, false),   // bin_array_minus_1(writable)
+        AccountMeta::new(dlmm_accounts[7].key(), true, false),   // bin_array_0(writable)
+        AccountMeta::new(dlmm_accounts[8].key(), true, false),   // bin_array_1(writable)
+    ];
+
+    let mut instruction_data = DLMM_INSTRUCTION_DATA;
+    instruction_data[8..16].copy_from_slice(&trade_amount.to_le_bytes());
+
+    let swap_instruction = Instruction {
+        program_id: dlmm_accounts[0].key(),
+        accounts: &account_metas,
+        data: &instruction_data,
+    };
+
+    let account_infos = [
+        &dlmm_accounts[3],        // pool_state
+        dlmm_program_id,          // bin_array_bitmap_extension
+        &dlmm_accounts[4],        // reserve_x
+        &dlmm_accounts[5],        // reserve_y
+        &header_accounts[8],      // user_token_in (token1)
+        &header_accounts[11],     // user_token_out (token2)
+        token_x_mint,             // token_x_mint
+        token_y_mint,             // token_y_mint
+        &dlmm_accounts[2],        // oracle
+        dlmm_program_id,          // host_fee_in
+        &header_accounts[0],      // payer
+        token_x_program,          // token_x_program
+        token_y_program,          // token_y_program
+        &header_accounts[5],      // memo_program
+        &dlmm_accounts[1],        // event_authority
+        dlmm_program_id,          // program
+        &dlmm_accounts[6],        // bin_array_minus_1
+        &dlmm_accounts[7],        // bin_array_0
+        &dlmm_accounts[8],        // bin_array_1
+    ];
+
+    invoke::<19>(&swap_instruction, &account_infos).map_err(|e| e.into())
+}
+
+fn execute_dlmm_swap_sell(
+    trade_amount: u64,
+    header_accounts: &[AccountInfo],
+    dlmm_accounts: &[AccountInfo],
+    is_wsol_x_mint: bool,
+) -> ProgramResult {
+    // 卖出交换：Token2 -> WSOL
+    // 输入：header_accounts[11] (token2_account)
+    // 输出：header_accounts[2] (wsol_account)
+    
+    // is_wsol_x_mint表示WSOL是否为X mint
+    // 如果WSOL是X mint，那么Token2是Y mint
+    // 如果WSOL是Y mint，那么Token2是X mint
+    let (token_x_mint, token_y_mint, token_x_program, token_y_program) = if is_wsol_x_mint {
+        // WSOL是X，Token2是Y
+        (&header_accounts[1], &header_accounts[9], &header_accounts[3], &header_accounts[10])
+    } else {
+        // WSOL是Y，Token2是X  
+        (&header_accounts[9], &header_accounts[1], &header_accounts[10], &header_accounts[3])
+    };
+
+    let dlmm_program_id = &dlmm_accounts[0];
+    
+    let account_metas = [
+        AccountMeta::new(dlmm_accounts[3].key(), true, false),   // pool_state(writable)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // bin_array_bitmap_extension(readonly)
+        AccountMeta::new(dlmm_accounts[4].key(), true, false),   // reserve_x(writable)
+        AccountMeta::new(dlmm_accounts[5].key(), true, false),   // reserve_y(writable)
+        AccountMeta::new(header_accounts[11].key(), true, false), // user_token_in (token2_account)
+        AccountMeta::new(header_accounts[2].key(), true, false),  // user_token_out (wsol_account)
+        AccountMeta::new(token_x_mint.key(), false, false),      // token_x_mint(readonly)
+        AccountMeta::new(token_y_mint.key(), false, false),      // token_y_mint(readonly)
+        AccountMeta::new(dlmm_accounts[2].key(), true, false),   // oracle(writable)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // host_fee_in(readonly)
+        AccountMeta::new(header_accounts[0].key(), true, true),  // payer (signer)
+        AccountMeta::new(token_x_program.key(), false, false),   // token_x_program(readonly)
+        AccountMeta::new(token_y_program.key(), false, false),   // token_y_program(readonly)
+        AccountMeta::new(header_accounts[5].key(), false, false), // memo_program(readonly)
+        AccountMeta::new(dlmm_accounts[1].key(), false, false),  // event_authority(readonly)
+        AccountMeta::new(dlmm_program_id.key(), false, false),   // program id(readonly)
+        AccountMeta::new(dlmm_accounts[6].key(), true, false),   // bin_array_minus_1(writable)
+        AccountMeta::new(dlmm_accounts[7].key(), true, false),   // bin_array_0(writable)
+        AccountMeta::new(dlmm_accounts[8].key(), true, false),   // bin_array_1(writable)
+    ];
+
+    let mut instruction_data = DLMM_INSTRUCTION_DATA;
+    instruction_data[8..16].copy_from_slice(&trade_amount.to_le_bytes());
+
+    let swap_instruction = Instruction {
+        program_id: dlmm_accounts[0].key(),
+        accounts: &account_metas,
+        data: &instruction_data,
+    };
+
+    let account_infos = [
+        &dlmm_accounts[3],        // pool_state
+        dlmm_program_id,          // bin_array_bitmap_extension
+        &dlmm_accounts[4],        // reserve_x
+        &dlmm_accounts[5],        // reserve_y
+        &header_accounts[11],     // user_token_in (token2)
+        &header_accounts[2],      // user_token_out (wsol)
+        token_x_mint,             // token_x_mint
+        token_y_mint,             // token_y_mint
+        &dlmm_accounts[2],        // oracle
+        dlmm_program_id,          // host_fee_in
+        &header_accounts[0],      // payer
+        token_x_program,          // token_x_program
+        token_y_program,          // token_y_program
+        &header_accounts[5],      // memo_program
+        &dlmm_accounts[1],        // event_authority
+        dlmm_program_id,          // program
+        &dlmm_accounts[6],        // bin_array_minus_1
+        &dlmm_accounts[7],        // bin_array_0
+        &dlmm_accounts[8],        // bin_array_1
+    ];
+
     invoke::<19>(&swap_instruction, &account_infos).map_err(|e| e.into())
 }

@@ -56,6 +56,11 @@ pub enum PinocchioCpiError {
     /// 账户所有者不匹配
     #[error("Account owner mismatch")]
     AccountOwnerMismatch,
+    
+    // 9
+    /// 账户所有者不匹配
+    #[error("Pump not supported in step 2")]
+    PumpNotSupported,
 }
 
 /// 🚀 从自定义错误转换为 ProgramError
@@ -109,6 +114,9 @@ impl ToStr for PinocchioCpiError {
             }
             PinocchioCpiError::AccountOwnerMismatch => {
                 "Error: Account owner mismatch - account not owned by expected program"
+            }
+            PinocchioCpiError::PumpNotSupported => {
+                "Error: Pump not supported in step 2"
             }
         }
     }
